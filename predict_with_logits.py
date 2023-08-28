@@ -90,11 +90,14 @@ def run_predict(img_path, model, hooks):
         x0, y0, x1, y1, *class_probs_after_sigmoid = xywh_sigmoid[:,i]
         x0, y0, x1, y1 = ops.scale_boxes(img_shape, np.array([x0.cpu(), y0.cpu(), x1.cpu(), y1.cpu()]), orig_img_shape)
         logits = all_logits[:,i]
-        boxes.append({
-            'bbox': [x0.item(), y0.item(), x1.item(), y1.item()],
-            'logits': logits.cpu().tolist(),
-            'activations': [p.item() for p in class_probs_after_sigmoid]
-        })
+
+        # Filter by threshold
+        if max(class_probs_after_sigmoid) > threshold:
+            boxes.append({
+                'bbox': [x0.item(), y0.item(), x1.item(), y1.item()],
+                'logits': logits.cpu().tolist(),
+                'activations': [p.item() for p in class_probs_after_sigmoid]
+            })
     return boxes
 
 
