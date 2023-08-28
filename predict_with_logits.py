@@ -6,6 +6,9 @@ from ultralytics import YOLO
 from ultralytics.nn.modules.head import Detect
 from ultralytics.utils import ops
 
+import matplotlib.pyplot as plt
+import cv2
+
 
 class SaveIO:
     """Simple PyTorch hook to save the output of a nn.module."""
@@ -46,7 +49,20 @@ def load_and_prepare_model(model_path):
 
     return model, hooks
 
-def run_predict(img_path, model, hooks):
+
+def plot_image(img_path, results):
+        
+    img = cv2.imread(img_path)
+    for box in results:
+        if max(box['activations']) > 0.5:
+            x0, y0, x1, y1 = [int(b) for b in box['bbox']]
+            img = cv2.rectangle(img,(x0,y0),(x1,y1),(0,255,0),3)
+
+    plt.imshow(img[:,:,::-1])
+    plt.savefig(f'{os.path.basename(img_path)}_test.jpg')
+
+
+def run_predict(img_path, model, hooks, threshold=0.5, save_image = False):
     """Run prediction with a YOLO model and get logits/class scores.
     Args:
         img_path: path to an image file
@@ -90,11 +106,17 @@ def run_predict(img_path, model, hooks):
         x0, y0, x1, y1, *class_probs_after_sigmoid = xywh_sigmoid[:,i]
         x0, y0, x1, y1 = ops.scale_boxes(img_shape, np.array([x0.cpu(), y0.cpu(), x1.cpu(), y1.cpu()]), orig_img_shape)
         logits = all_logits[:,i]
-        boxes.append({
-            'bbox': [x0.item(), y0.item(), x1.item(), y1.item()],
-            'logits': logits.cpu().tolist(),
-            'activations': [p.item() for p in class_probs_after_sigmoid]
-        })
+        
+        if max(class_probs_after_sigmoid) > threshold:
+            boxes.append({
+                'bbox': [x0.item(), y0.item(), x1.item(), y1.item()],
+                'logits': logits.cpu().tolist(),
+                'activations': [p.item() for p in class_probs_after_sigmoid]
+            })
+
+    if save_image:
+        plot_image(img_path, boxes)
+
     return boxes
 
 
@@ -105,6 +127,7 @@ def main():
     SAVE_TEST_IMG = False
     model_path = 'yolov8n.pt'
     img_path = 'bus.jpg'
+    threshold = 0.5
 
     # load the model
     model, hooks = load_and_prepare_model(model_path)
@@ -116,16 +139,7 @@ def main():
     print("The first one is", results[0])
 
     if SAVE_TEST_IMG:
-        import matplotlib.pyplot as plt
-        import cv2
-        img = cv2.imread(img_path)
-        for box in results:
-            if max(box['probs_after_sigmoid']) > 0.5:
-                x0, y0, x1, y1 = [int(b) for b in box['bbox']]
-                img = cv2.rectangle(img,(x0,y0),(x1,y1),(0,255,0),3)
-
-        plt.imshow(img[:,:,::-1])
-        plt.savefig(f'{os.path.basename(img_path)}_test.jpg')
+        plot_image(img_path, results)
 
 if __name__ == '__main__':
     main()
