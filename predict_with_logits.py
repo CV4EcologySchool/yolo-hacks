@@ -54,6 +54,17 @@ def load_and_prepare_model(model_path):
     return model, hooks
 
 
+def is_text_file(file_path):
+    # Check if the file extension indicates a text file
+    text_extensions = ['.txt'] #, '.csv', '.json', '.xml']  # Add more extensions if needed
+    return any(file_path.lower().endswith(ext) for ext in text_extensions)
+
+def is_image_file(file_path):
+    # Check if the file extension indicates an image file
+    image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp']  # Add more extensions if needed
+    return any(file_path.lower().endswith(ext) for ext in image_extensions)
+
+
 def plot_image(img_path, results):
     """
     Display the image with bounding boxes and their corresponding class scores.
@@ -101,6 +112,31 @@ def plot_image(img_path, results):
     plt.savefig(f'{os.path.basename(img_path)}_test.jpg', bbox_inches="tight", dpi=300)
 
 
+def write_json(img_path, results):
+    # Create a list to store the predictions data
+    predictions = []
+
+    for result in results:
+        image_id = os.path.basename(img_path).split('.')[0]
+        max_category_id = result['activations'].index(max(result['activations']))
+        category_id = max_category_id
+        bbox = result['bbox']
+        score = max(result['activations'])
+        activations = result['activations']
+
+        prediction = {
+            'image_id': image_id,
+            'category_id': category_id,
+            'bbox': bbox,
+            'score': score,
+            'activations': activations
+        }
+
+        predictions.append(prediction)
+
+    # Write the predictions list to a JSON file
+    with open('predictions.json', 'w') as f:
+        json.dump(predictions, f)
 
 
 def calculate_iou(box1, box2):
@@ -162,7 +198,7 @@ def nms(boxes, iou_threshold=0.7):
     return filtered_boxes
 
 
-def run_predict(img_path, model, hooks, threshold=0.5, iou=0.7, save_image = False, save_json = False):
+def results_predict(img_path, model, hooks, threshold=0.5, iou=0.7, save_image = False):
     """
     Run prediction with a YOLO model and apply Non-Maximum Suppression (NMS) to the results.
 
@@ -173,7 +209,6 @@ def run_predict(img_path, model, hooks, threshold=0.5, iou=0.7, save_image = Fal
         threshold (float, optional): Confidence threshold for detection. Default is 0.5.
         iou (float, optional): Intersection over Union (IoU) threshold for NMS. Default is 0.7.
         save_image (bool, optional): Whether to save the image with boxes plotted. Default is False.
-        save_json (bool, optional): Whether to save the results in a json file. Default is False.
 
     Returns:
         list: List of selected bounding box dictionaries after NMS.
@@ -224,37 +259,50 @@ def run_predict(img_path, model, hooks, threshold=0.5, iou=0.7, save_image = Fal
     if save_image:
         plot_image(img_path, nms_results)
 
-    if save_json:
-        write_json(img_path, nms_results)
+    # if save_json:
+    #     write_json(img_path, nms_results)
 
     return nms_results
 
 
-def write_json(img_path, results):
-    # Create a list to store the predictions data
-    predictions = []
+def run_predict(input_path, model, hooks, threshold=0.5, iou_threshold=0.7, save_image = False, save_json = False):
+    """
+    Run prediction with a YOLO model.
 
-    for result in results:
-        image_id = os.path.basename(img_path).split('.')[0]
-        max_category_id = result['activations'].index(max(result['activations']))
-        category_id = max_category_id
-        bbox = result['bbox']
-        score = max(result['activations'])
-        activations = result['activations']
+    Args:
+        input_path (str): Path to an image file or txt file containing paths to image files.
+        model (YOLO): YOLO model object.
+        hooks (list): List of hooks for the model.
+        threshold (float, optional): Confidence threshold for detection. Default is 0.5.
+        iou_threshold (float, optional): Intersection over Union (IoU) threshold for NMS. Default is 0.7.
+        save_image (bool, optional): Whether to save the image with boxes plotted. Default is False.
+        save_json (bool, optional): Whether to save the results in a json file. Default is False.
 
-        prediction = {
-            'image_id': image_id,
-            'category_id': category_id,
-            'bbox': bbox,
-            'score': score,
-            'activations': activations
-        }
+    Returns:
+        list: List of selected bounding box dictionaries for all the images given as input.
+    """
+    use_txt_input = False
 
-        predictions.append(prediction)
+    if is_text_file(input_path):
+        use_txt_input = True
 
-    # Write the predictions list to a JSON file
-    with open('predictions.json', 'w') as f:
-        json.dump(predictions, f)
+    if use_txt_input:
+        with open(input_path, 'r') as f:
+            img_paths = f.read().splitlines()
+    else:
+        img_paths = [input_path]
+
+    all_results = []
+
+    for img_path in img_paths:
+        results = results_predict(img_path, model, hooks, threshold, iou=iou_threshold, save_image=save_image)
+
+        all_results.extend(results)
+
+    if save_json:
+        write_json(img_path, all_results)
+
+    return all_results
 
 
 ### Start example script here ###
