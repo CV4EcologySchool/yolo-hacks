@@ -54,15 +54,72 @@ def plot_image(img_path, results):
         
     img = cv2.imread(img_path)
     for box in results:
-        if max(box['activations']) > 0.5:
-            x0, y0, x1, y1 = [int(b) for b in box['bbox']]
-            img = cv2.rectangle(img,(x0,y0),(x1,y1),(0,255,0),3)
+        x0, y0, x1, y1 = [int(b) for b in box['bbox']]
+        # print("new bounding" +  str(box['bbox']))
+        img = cv2.rectangle(img,(x0,y0),(x1,y1),(0,255,0),3)
 
     plt.imshow(img[:,:,::-1])
     plt.savefig(f'{os.path.basename(img_path)}_test.jpg')
 
 
-def run_predict(img_path, model, hooks, threshold=0.5, save_image = False):
+def calculate_iou(box1, box2):
+    """
+    Calculates the Intersection over Union (IoU) between two bounding boxes.
+
+    Args:
+        box1 (list): Bounding box coordinates [x1, y1, w1, h1].
+        box2 (list): Bounding box coordinates [x2, y2, w2, h2].
+
+    Returns:
+        float: Intersection over Union (IoU) value.
+    """
+    x1, y1, w1, h1 = box1
+    x2, y2, w2, h2 = box2
+
+    intersect_x1 = max(x1, x2)
+    intersect_y1 = max(y1, y2)
+    intersect_x2 = min(x1 + w1, x2 + w2)
+    intersect_y2 = min(y1 + h1, y2 + h2)
+
+    intersect_area = max(0, intersect_x2 - intersect_x1 + 1) * max(0, intersect_y2 - intersect_y1 + 1)
+    box1_area = w1 * h1
+    box2_area = w2 * h2
+
+    iou = intersect_area / float(box1_area + box2_area - intersect_area)
+    return iou
+
+
+# Apply Non-Maximum Suppression
+def nms(boxes, iou_threshold=0.7):
+    """
+    Applies Non-Maximum Suppression (NMS) to a list of bounding box dictionaries.
+
+    Args:
+        boxes (list): List of dictionaries, each containing 'bbox', 'logits', and 'activations'.
+        iou_threshold (float, optional): Intersection over Union (IoU) threshold for NMS. Default is 0.7.
+
+    Returns:
+        list: List of selected bounding box dictionaries after NMS.
+    """
+    # Sort boxes by confidence score in descending order
+    sorted_boxes = sorted(boxes, key=lambda x: x['activations'][0], reverse=True)
+    selected_boxes = []
+
+    # Keep the box with highest confidence and remove overlapping boxes
+    while sorted_boxes:
+        best_box = sorted_boxes.pop(0)
+        selected_boxes.append(best_box)
+
+        filtered_boxes = []
+        for box in sorted_boxes:
+            if calculate_iou(best_box['bbox'], box['bbox']) < iou_threshold:
+                filtered_boxes.append(box)
+        sorted_boxes = filtered_boxes
+
+    return selected_boxes
+
+
+def run_predict(img_path, model, hooks, threshold=0.5, iou=0.7, save_image = False):
     """Run prediction with a YOLO model and get logits/class scores.
     Args:
         img_path: path to an image file
@@ -114,10 +171,12 @@ def run_predict(img_path, model, hooks, threshold=0.5, save_image = False):
                 'activations': [p.item() for p in class_probs_after_sigmoid]
             })
 
-    if save_image:
-        plot_image(img_path, boxes)
+    nms_results = nms(boxes, iou)
 
-    return boxes
+    if save_image:
+        plot_image(img_path, nms_results)
+
+    return nms_results
 
 
 ### Start example script here ###
