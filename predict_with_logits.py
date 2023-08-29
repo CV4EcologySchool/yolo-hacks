@@ -7,8 +7,11 @@ from ultralytics.nn.modules.head import Detect
 from ultralytics.utils import ops
 
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 import cv2
+from PIL import Image
 
+import json
 
 class SaveIO:
     """Simple PyTorch hook to save the output of a nn.module."""
@@ -50,16 +53,96 @@ def load_and_prepare_model(model_path):
     return model, hooks
 
 
-def plot_image(img_path, results):
-        
-    img = cv2.imread(img_path)
-    for box in results:
-        x0, y0, x1, y1 = [int(b) for b in box['bbox']]
-        # print("new bounding" +  str(box['bbox']))
-        img = cv2.rectangle(img,(x0,y0),(x1,y1),(0,255,0),3)
+def is_text_file(file_path):
+    # Check if the file extension indicates a text file
+    text_extensions = ['.txt'] #, '.csv', '.json', '.xml']  # Add more extensions if needed
+    return any(file_path.lower().endswith(ext) for ext in text_extensions)
 
-    plt.imshow(img[:,:,::-1])
-    plt.savefig(f'{os.path.basename(img_path)}_test.jpg')
+def is_image_file(file_path):
+    # Check if the file extension indicates an image file
+    image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp']  # Add more extensions if needed
+    return any(file_path.lower().endswith(ext) for ext in image_extensions)
+
+
+def plot_image(img_path, results, category_mapping = None):
+    """
+    Display the image with bounding boxes and their corresponding class scores.
+
+    Args:
+        img_path (str): Path to the image file.
+        results (list): List of dictionaries containing bounding box information.
+
+    Returns:
+        None
+    """
+
+    img = Image.open(img_path)
+    fig, ax = plt.subplots()
+    ax.imshow(img)
+
+    for box in results:
+        x0, y0, x1, y1 = map(int, box['bbox'])
+        box_color = "r"  # red
+        tag_color = "k"  # black
+        max_score = max(box['activations'])
+        max_category_id = box['activations'].index(max_score)
+        category_name = max_category_id
+
+        if category_mapping:
+            max_category_name = category_mapping.get(max_category_id, "Unknown")
+            category_name = max_category_name
+
+        rect = patches.Rectangle(
+            (x0, y0),
+            x1 - x0,
+            y1 - y0,
+            edgecolor=box_color,
+            label=f"{max_category_id}: {category_name} ({max_score:.2f})",
+            facecolor='none'
+        )
+        ax.add_patch(rect)
+
+        plt.text(
+            x0,
+            y0 - 50,
+            f"{max_category_id} ({max_score:.2f})",
+            fontsize="5",
+            color=tag_color,
+            backgroundcolor=box_color,
+        )
+
+    ax.legend(fontsize="5")
+    plt.axis("off")
+    plt.savefig(f'{os.path.basename(img_path)}_test.jpg', bbox_inches="tight", dpi=300)
+
+
+def write_json(results):
+    # Create a list to store the predictions data
+    predictions = []
+
+    for result in results:
+        image_id = os.path.basename(result['image_id'])#.split('.')[0]
+        # image_id = result["image_id"]
+        #image_id = os.path.basename(img_path).split('.')[0]
+        max_category_id = result['activations'].index(max(result['activations']))
+        category_id = max_category_id
+        bbox = result['bbox']
+        score = max(result['activations'])
+        activations = result['activations']
+
+        prediction = {
+            'image_id': image_id,
+            'category_id': category_id,
+            'bbox': bbox,
+            'score': score,
+            'activations': activations
+        }
+
+        predictions.append(prediction)
+
+    # Write the predictions list to a JSON file
+    with open('predictions.json', 'w') as f:
+        json.dump(predictions, f)
 
 
 def calculate_iou(box1, box2):
@@ -102,34 +185,39 @@ def nms(boxes, iou_threshold=0.7):
         list: List of selected bounding box dictionaries after NMS.
     """
     # Sort boxes by confidence score in descending order
-    sorted_boxes = sorted(boxes, key=lambda x: x['activations'][0], reverse=True)
+    sorted_boxes = sorted(boxes, key=lambda x: max(x['activations']), reverse=True)
     selected_boxes = []
 
     # Keep the box with highest confidence and remove overlapping boxes
-    while sorted_boxes:
-        best_box = sorted_boxes.pop(0)
-        selected_boxes.append(best_box)
+    delete_idxs = []
+    for i, box0 in enumerate(sorted_boxes):
+        for j, box1 in enumerate(sorted_boxes):
+            if i < j and calculate_iou(box0['bbox'], box1['bbox']) > iou_threshold:
+                delete_idxs.append(j)
 
-        filtered_boxes = []
-        for box in sorted_boxes:
-            if calculate_iou(best_box['bbox'], box['bbox']) < iou_threshold:
-                filtered_boxes.append(box)
-        sorted_boxes = filtered_boxes
+    # Reverse the order of delete_idxs
+    delete_idxs.reverse()
 
-    return selected_boxes
+    # now delete by popping them in reverse order
+    filtered_boxes = [box for idx, box in enumerate(sorted_boxes) if idx not in delete_idxs]
+
+    return filtered_boxes
 
 
-def run_predict(img_path, model, hooks, threshold=0.5, iou=0.7, save_image = False):
-    """Run prediction with a YOLO model and get logits/class scores.
+def results_predict(img_path, model, hooks, threshold=0.5, iou=0.7, save_image = False, category_mapping = None):
+    """
+    Run prediction with a YOLO model and apply Non-Maximum Suppression (NMS) to the results.
+
     Args:
-        img_path: path to an image file
-        model: a YOLO object (see load_and_prepare_model() function above)
-        hooks: hooks added by the load_and_prepare_model() function above
-    Returns
-        boxes: a list of dictionaries. each dictionary contains:
-            bbox: list, [x0,y1,x1,y1], in original image coordinate space
-            logits: list, raw logits vector, one entry per class
-            activations: list, pred scores after calling logits.sigmoid()
+        img_path (str): Path to an image file.
+        model (YOLO): YOLO model object.
+        hooks (list): List of hooks for the model.
+        threshold (float, optional): Confidence threshold for detection. Default is 0.5.
+        iou (float, optional): Intersection over Union (IoU) threshold for NMS. Default is 0.7.
+        save_image (bool, optional): Whether to save the image with boxes plotted. Default is False.
+
+    Returns:
+        list: List of selected bounding box dictionaries after NMS.
     """
     # unpack hooks from load_and_prepare_model()
     input_hook, detect, detect_hook, cv2_hooks, cv3_hooks = hooks
@@ -164,9 +252,12 @@ def run_predict(img_path, model, hooks, threshold=0.5, iou=0.7, save_image = Fal
         x0, y0, x1, y1 = ops.scale_boxes(img_shape, np.array([x0.cpu(), y0.cpu(), x1.cpu(), y1.cpu()]), orig_img_shape)
         logits = all_logits[:,i]
         
+        # Filter by score threshold (of max score class)
         if max(class_probs_after_sigmoid) > threshold:
             boxes.append({
-                'bbox': [x0.item(), y0.item(), x1.item(), y1.item()],
+                'image_id': img_path,
+                # YOLO output coordinates: [x,y,w,h]: (x,y)=top left corner, w=width, h=height
+                'bbox': [x0.item(), y0.item(), x1.item() - x0.item(), y1.item() - y0.item()],
                 'logits': logits.cpu().tolist(),
                 'activations': [p.item() for p in class_probs_after_sigmoid]
             })
@@ -174,9 +265,77 @@ def run_predict(img_path, model, hooks, threshold=0.5, iou=0.7, save_image = Fal
     nms_results = nms(boxes, iou)
 
     if save_image:
-        plot_image(img_path, nms_results)
+        plot_image(img_path, nms_results, category_mapping)
+
+    # if save_json:
+    #     write_json(img_path, nms_results)
 
     return nms_results
+
+
+def run_predict(input_path, model, hooks, score_threshold=0.5, iou_threshold=0.7, save_image = False, save_json = False, category_mapping = None):
+    """
+    Run prediction with a YOLO model.
+
+    Args:
+        input_path (str): Path to an image file or txt file containing paths to image files.
+        model (YOLO): YOLO model object.
+        hooks (list): List of hooks for the model.
+        threshold (float, optional): Confidence threshold for detection. Default is 0.5.
+        iou_threshold (float, optional): Intersection over Union (IoU) threshold for NMS. Default is 0.7.
+        save_image (bool, optional): Whether to save the image with boxes plotted. Default is False.
+        save_json (bool, optional): Whether to save the results in a json file. Default is False.
+
+    Returns:
+        list: List of selected bounding box dictionaries for all the images given as input.
+    """
+    use_txt_input = False
+
+    if is_text_file(input_path):
+        use_txt_input = True
+
+    if use_txt_input:
+        with open(input_path, 'r') as f:
+            img_paths = f.read().splitlines()
+    else:
+        img_paths = [input_path]
+
+    all_results = []
+
+    for img_path in img_paths:
+        results = results_predict(img_path, model, hooks, score_threshold, iou=iou_threshold, save_image=save_image, category_mapping=category_mapping)
+
+        all_results.extend(results)
+
+    if save_json:
+        write_json(all_results)
+
+    return all_results
+
+
+### Start example script here ###
+### (This shows how to use the methods in this file) ###
+def main():
+    # change these, of course :)
+    SAVE_TEST_IMG = False
+    model_path = 'yolov8n.pt'
+    img_path = 'bus.jpg'
+    threshold = 0.5
+
+    # load the model
+    model, hooks = load_and_prepare_model(model_path)
+
+    # run inference
+    results = run_predict(img_path, model, hooks)
+
+    print("Processed", len(results), "boxes")
+    print("The first one is", results[0])
+
+    if SAVE_TEST_IMG:
+        plot_image(img_path, results)
+
+if __name__ == '__main__':
+    main()
 
 
 ### Start example script here ###
