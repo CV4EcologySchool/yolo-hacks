@@ -11,6 +11,8 @@ import matplotlib.patches as patches
 import cv2
 from PIL import Image
 
+import json
+
 
 class SaveIO:
     """Simple PyTorch hook to save the output of a nn.module."""
@@ -63,26 +65,15 @@ def plot_image(img_path, results):
     Returns:
         None
     """
+
     img = Image.open(img_path)
-    img_width, img_height = img.size
-
-    # Calculate aspect ratio for the figure
-    aspect_ratio = img_width / img_height
-
-    # Set figure size based on the aspect ratio
-    fig_width = 8  # Set your desired figure width
-    fig_height = fig_width / aspect_ratio
-
-    plt.figure(figsize=(fig_width, fig_height))
-    plt.imshow(img)
+    fig, ax = plt.subplots()
+    ax.imshow(img)
 
     for box in results:
-        x0, y0, x1, y1 = [int(b) for b in box['bbox']]
-
+        x0, y0, x1, y1 = map(int, box['bbox'])
         box_color = "r"  # red
         tag_color = "k"  # black
-
-        # Extract Bounding Box Max score idx and value
         max_score = max(box['activations'])
         max_category_id = box['activations'].index(max_score)
 
@@ -94,10 +85,8 @@ def plot_image(img_path, results):
             label=f"{max_category_id} ({max_score:.2f})",
             facecolor='none'
         )
+        ax.add_patch(rect)
 
-        plt.gca().add_patch(rect)
-
-        # Show class and score on plot
         plt.text(
             x0,
             y0 - 50,
@@ -107,9 +96,7 @@ def plot_image(img_path, results):
             backgroundcolor=box_color,
         )
 
-    plt.legend(fontsize="5")
-
-    # Show plot
+    ax.legend(fontsize="5")
     plt.axis("off")
     plt.savefig(f'{os.path.basename(img_path)}_test.jpg', bbox_inches="tight", dpi=300)
 
@@ -175,17 +162,21 @@ def nms(boxes, iou_threshold=0.7):
     return filtered_boxes
 
 
-def run_predict(img_path, model, hooks, threshold=0.5, iou=0.7, save_image = False):
-    """Run prediction with a YOLO model and get logits/class scores.
+def run_predict(img_path, model, hooks, threshold=0.5, iou=0.7, save_image = False, save_json = False):
+    """
+    Run prediction with a YOLO model and apply Non-Maximum Suppression (NMS) to the results.
+
     Args:
-        img_path: path to an image file
-        model: a YOLO object (see load_and_prepare_model() function above)
-        hooks: hooks added by the load_and_prepare_model() function above
-    Returns
-        boxes: a list of dictionaries. each dictionary contains:
-            bbox: list, [x0,y1,x1,y1], in original image coordinate space
-            logits: list, raw logits vector, one entry per class
-            activations: list, pred scores after calling logits.sigmoid()
+        img_path (str): Path to an image file.
+        model (YOLO): YOLO model object.
+        hooks (list): List of hooks for the model.
+        threshold (float, optional): Confidence threshold for detection. Default is 0.5.
+        iou (float, optional): Intersection over Union (IoU) threshold for NMS. Default is 0.7.
+        save_image (bool, optional): Whether to save the image with boxes plotted. Default is False.
+        save_json (bool, optional): Whether to save the results in a json file. Default is False.
+
+    Returns:
+        list: List of selected bounding box dictionaries after NMS.
     """
     # unpack hooks from load_and_prepare_model()
     input_hook, detect, detect_hook, cv2_hooks, cv3_hooks = hooks
@@ -233,7 +224,37 @@ def run_predict(img_path, model, hooks, threshold=0.5, iou=0.7, save_image = Fal
     if save_image:
         plot_image(img_path, nms_results)
 
+    if save_json:
+        write_json(img_path, nms_results)
+
     return nms_results
+
+
+def write_json(img_path, results):
+    # Create a list to store the predictions data
+    predictions = []
+
+    for result in results:
+        image_id = os.path.basename(img_path).split('.')[0]
+        max_category_id = result['activations'].index(max(result['activations']))
+        category_id = max_category_id
+        bbox = result['bbox']
+        score = max(result['activations'])
+        activations = result['activations']
+
+        prediction = {
+            'image_id': image_id,
+            'category_id': category_id,
+            'bbox': bbox,
+            'score': score,
+            'activations': activations
+        }
+
+        predictions.append(prediction)
+
+    # Write the predictions list to a JSON file
+    with open('predictions.json', 'w') as f:
+        json.dump(predictions, f)
 
 
 ### Start example script here ###
