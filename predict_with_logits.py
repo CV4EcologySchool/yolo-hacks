@@ -13,7 +13,6 @@ from PIL import Image
 
 import json
 
-
 class SaveIO:
     """Simple PyTorch hook to save the output of a nn.module."""
     def __init__(self):
@@ -65,7 +64,7 @@ def is_image_file(file_path):
     return any(file_path.lower().endswith(ext) for ext in image_extensions)
 
 
-def plot_image(img_path, results):
+def plot_image(img_path, results, category_mapping = None):
     """
     Display the image with bounding boxes and their corresponding class scores.
 
@@ -87,13 +86,18 @@ def plot_image(img_path, results):
         tag_color = "k"  # black
         max_score = max(box['activations'])
         max_category_id = box['activations'].index(max_score)
+        category_name = max_category_id
+
+        if category_mapping:
+            max_category_name = category_mapping.get(max_category_id, "Unknown")
+            category_name = max_category_name
 
         rect = patches.Rectangle(
             (x0, y0),
             x1 - x0,
             y1 - y0,
             edgecolor=box_color,
-            label=f"{max_category_id} ({max_score:.2f})",
+            label=f"{max_category_id}: {category_name} ({max_score:.2f})",
             facecolor='none'
         )
         ax.add_patch(rect)
@@ -112,12 +116,14 @@ def plot_image(img_path, results):
     plt.savefig(f'{os.path.basename(img_path)}_test.jpg', bbox_inches="tight", dpi=300)
 
 
-def write_json(img_path, results):
+def write_json(results):
     # Create a list to store the predictions data
     predictions = []
 
     for result in results:
-        image_id = os.path.basename(img_path).split('.')[0]
+        image_id = os.path.basename(result['image_id'])#.split('.')[0]
+        # image_id = result["image_id"]
+        #image_id = os.path.basename(img_path).split('.')[0]
         max_category_id = result['activations'].index(max(result['activations']))
         category_id = max_category_id
         bbox = result['bbox']
@@ -198,7 +204,7 @@ def nms(boxes, iou_threshold=0.7):
     return filtered_boxes
 
 
-def results_predict(img_path, model, hooks, threshold=0.5, iou=0.7, save_image = False):
+def results_predict(img_path, model, hooks, threshold=0.5, iou=0.7, save_image = False, category_mapping = None):
     """
     Run prediction with a YOLO model and apply Non-Maximum Suppression (NMS) to the results.
 
@@ -249,7 +255,9 @@ def results_predict(img_path, model, hooks, threshold=0.5, iou=0.7, save_image =
         # Filter by score threshold (of max score class)
         if max(class_probs_after_sigmoid) > threshold:
             boxes.append({
-                'bbox': [x0.item(), y0.item(), x1.item(), y1.item()],
+                'image_id': img_path,
+                # YOLO output coordinates: [x,y,w,h]: (x,y)=top left corner, w=width, h=height
+                'bbox': [x0.item(), y0.item(), x1.item() - x0.item(), y1.item() - y0.item()],
                 'logits': logits.cpu().tolist(),
                 'activations': [p.item() for p in class_probs_after_sigmoid]
             })
@@ -257,7 +265,7 @@ def results_predict(img_path, model, hooks, threshold=0.5, iou=0.7, save_image =
     nms_results = nms(boxes, iou)
 
     if save_image:
-        plot_image(img_path, nms_results)
+        plot_image(img_path, nms_results, category_mapping)
 
     # if save_json:
     #     write_json(img_path, nms_results)
@@ -265,7 +273,7 @@ def results_predict(img_path, model, hooks, threshold=0.5, iou=0.7, save_image =
     return nms_results
 
 
-def run_predict(input_path, model, hooks, threshold=0.5, iou_threshold=0.7, save_image = False, save_json = False):
+def run_predict(input_path, model, hooks, score_threshold=0.5, iou_threshold=0.7, save_image = False, save_json = False, category_mapping = None):
     """
     Run prediction with a YOLO model.
 
@@ -295,12 +303,12 @@ def run_predict(input_path, model, hooks, threshold=0.5, iou_threshold=0.7, save
     all_results = []
 
     for img_path in img_paths:
-        results = results_predict(img_path, model, hooks, threshold, iou=iou_threshold, save_image=save_image)
+        results = results_predict(img_path, model, hooks, score_threshold, iou=iou_threshold, save_image=save_image, category_mapping=category_mapping)
 
         all_results.extend(results)
 
     if save_json:
-        write_json(img_path, all_results)
+        write_json(all_results)
 
     return all_results
 
@@ -313,23 +321,43 @@ def main():
     model_path = 'yolov8n.pt'
     img_path = 'bus.jpg'
     threshold = 0.5
-    iou_threshold = 0.7
 
     # load the model
     model, hooks = load_and_prepare_model(model_path)
 
     # run inference
-    results = run_predict(img_path, model, hooks, threshold, iou=iou_threshold, save_image=SAVE_TEST_IMG)
+    results = run_predict(img_path, model, hooks)
 
-    # Print Boxes information
     print("Processed", len(results), "boxes")
+    print("The first one is", results[0])
 
-    for result in results:
-        print("\n")
-        print("Bounding Box :" + str(result['bbox']))
-        print("Logits :" + str(result['logits']))
-        print("Activations :" + str(result['activations']))
-        print("\n")
+    if SAVE_TEST_IMG:
+        plot_image(img_path, results)
+
+if __name__ == '__main__':
+    main()
+
+
+### Start example script here ###
+### (This shows how to use the methods in this file) ###
+def main():
+    # change these, of course :)
+    SAVE_TEST_IMG = False
+    model_path = 'yolov8n.pt'
+    img_path = 'bus.jpg'
+    threshold = 0.5
+
+    # load the model
+    model, hooks = load_and_prepare_model(model_path)
+
+    # run inference
+    results = run_predict(img_path, model, hooks)
+
+    print("Processed", len(results), "boxes")
+    print("The first one is", results[0])
+
+    if SAVE_TEST_IMG:
+        plot_image(img_path, results)
 
 if __name__ == '__main__':
     main()
