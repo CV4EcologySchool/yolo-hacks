@@ -6,6 +6,9 @@ from ultralytics import YOLO
 from ultralytics.nn.modules.head import Detect
 from ultralytics.utils import ops
 
+import matplotlib.pyplot as plt
+import cv2
+
 
 class SaveIO:
     """Simple PyTorch hook to save the output of a nn.module."""
@@ -46,7 +49,77 @@ def load_and_prepare_model(model_path):
 
     return model, hooks
 
-def run_predict(img_path, model, hooks):
+
+def plot_image(img_path, results):
+        
+    img = cv2.imread(img_path)
+    for box in results:
+        x0, y0, x1, y1 = [int(b) for b in box['bbox']]
+        # print("new bounding" +  str(box['bbox']))
+        img = cv2.rectangle(img,(x0,y0),(x1,y1),(0,255,0),3)
+
+    plt.imshow(img[:,:,::-1])
+    plt.savefig(f'{os.path.basename(img_path)}_test.jpg')
+
+
+def calculate_iou(box1, box2):
+    """
+    Calculates the Intersection over Union (IoU) between two bounding boxes.
+
+    Args:
+        box1 (list): Bounding box coordinates [x1, y1, w1, h1].
+        box2 (list): Bounding box coordinates [x2, y2, w2, h2].
+
+    Returns:
+        float: Intersection over Union (IoU) value.
+    """
+    x1, y1, w1, h1 = box1
+    x2, y2, w2, h2 = box2
+
+    intersect_x1 = max(x1, x2)
+    intersect_y1 = max(y1, y2)
+    intersect_x2 = min(x1 + w1, x2 + w2)
+    intersect_y2 = min(y1 + h1, y2 + h2)
+
+    intersect_area = max(0, intersect_x2 - intersect_x1 + 1) * max(0, intersect_y2 - intersect_y1 + 1)
+    box1_area = w1 * h1
+    box2_area = w2 * h2
+
+    iou = intersect_area / float(box1_area + box2_area - intersect_area)
+    return iou
+
+
+# Apply Non-Maximum Suppression
+def nms(boxes, iou_threshold=0.7):
+    """
+    Applies Non-Maximum Suppression (NMS) to a list of bounding box dictionaries.
+
+    Args:
+        boxes (list): List of dictionaries, each containing 'bbox', 'logits', and 'activations'.
+        iou_threshold (float, optional): Intersection over Union (IoU) threshold for NMS. Default is 0.7.
+
+    Returns:
+        list: List of selected bounding box dictionaries after NMS.
+    """
+    # Sort boxes by confidence score in descending order
+    sorted_boxes = sorted(boxes, key=lambda x: x['activations'][0], reverse=True)
+    selected_boxes = []
+
+    # Keep the box with highest confidence and remove overlapping boxes
+    while sorted_boxes:
+        best_box = sorted_boxes.pop(0)
+        selected_boxes.append(best_box)
+
+        filtered_boxes = []
+        for box in sorted_boxes:
+            if calculate_iou(best_box['bbox'], box['bbox']) < iou_threshold:
+                filtered_boxes.append(box)
+        sorted_boxes = filtered_boxes
+
+    return selected_boxes
+
+
+def run_predict(img_path, model, hooks, threshold=0.5, iou=0.7, save_image = False):
     """Run prediction with a YOLO model and get logits/class scores.
     Args:
         img_path: path to an image file
@@ -90,12 +163,20 @@ def run_predict(img_path, model, hooks):
         x0, y0, x1, y1, *class_probs_after_sigmoid = xywh_sigmoid[:,i]
         x0, y0, x1, y1 = ops.scale_boxes(img_shape, np.array([x0.cpu(), y0.cpu(), x1.cpu(), y1.cpu()]), orig_img_shape)
         logits = all_logits[:,i]
-        boxes.append({
-            'bbox': [x0.item(), y0.item(), x1.item(), y1.item()],
-            'logits': logits.cpu().tolist(),
-            'activations': [p.item() for p in class_probs_after_sigmoid]
-        })
-    return boxes
+        
+        if max(class_probs_after_sigmoid) > threshold:
+            boxes.append({
+                'bbox': [x0.item(), y0.item(), x1.item(), y1.item()],
+                'logits': logits.cpu().tolist(),
+                'activations': [p.item() for p in class_probs_after_sigmoid]
+            })
+
+    nms_results = nms(boxes, iou)
+
+    if save_image:
+        plot_image(img_path, nms_results)
+
+    return nms_results
 
 
 ### Start example script here ###
@@ -105,6 +186,7 @@ def main():
     SAVE_TEST_IMG = False
     model_path = 'yolov8n.pt'
     img_path = 'bus.jpg'
+    threshold = 0.5
 
     # load the model
     model, hooks = load_and_prepare_model(model_path)
@@ -116,16 +198,7 @@ def main():
     print("The first one is", results[0])
 
     if SAVE_TEST_IMG:
-        import matplotlib.pyplot as plt
-        import cv2
-        img = cv2.imread(img_path)
-        for box in results:
-            if max(box['probs_after_sigmoid']) > 0.5:
-                x0, y0, x1, y1 = [int(b) for b in box['bbox']]
-                img = cv2.rectangle(img,(x0,y0),(x1,y1),(0,255,0),3)
-
-        plt.imshow(img[:,:,::-1])
-        plt.savefig(f'{os.path.basename(img_path)}_test.jpg')
+        plot_image(img_path, results)
 
 if __name__ == '__main__':
     main()
