@@ -64,13 +64,15 @@ def is_image_file(file_path):
     return any(file_path.lower().endswith(ext) for ext in image_extensions)
 
 
-def plot_image(img_path, results, category_mapping = None):
+def plot_image(img_path, results, category_mapping=None, suffix='test', show_labels=True, include_legend=True):
     """
     Display the image with bounding boxes and their corresponding class scores.
 
     Args:
         img_path (str): Path to the image file.
         results (list): List of dictionaries containing bounding box information.
+        category_mapping:
+        suffix: what to append to the original image name when saving
 
     Returns:
         None
@@ -82,6 +84,7 @@ def plot_image(img_path, results, category_mapping = None):
 
     for box in results:
         x0, y0, x1, y1 = map(int, box['bbox'])
+
         box_color = "r"  # red
         tag_color = "k"  # black
         max_score = max(box['activations'])
@@ -102,18 +105,21 @@ def plot_image(img_path, results, category_mapping = None):
         )
         ax.add_patch(rect)
 
-        plt.text(
-            x0,
-            y0 - 50,
-            f"{max_category_id} ({max_score:.2f})",
-            fontsize="5",
-            color=tag_color,
-            backgroundcolor=box_color,
-        )
+        if show_labels:
+            plt.text(
+                x0,
+                y0 - 50,
+                f"{max_category_id} ({max_score:.2f})",
+                fontsize="5",
+                color=tag_color,
+                backgroundcolor=box_color,
+            )
 
-    ax.legend(fontsize="5")
+    if include_legend:
+        ax.legend(fontsize="5")
+
     plt.axis("off")
-    plt.savefig(f'{os.path.basename(img_path)}_test.jpg', bbox_inches="tight", dpi=300)
+    plt.savefig(f'{os.path.basename(img_path).rsplit(".", 1)[0]}_{suffix}.jpg', bbox_inches="tight", dpi=300)
 
 
 def write_json(results):
@@ -252,25 +258,48 @@ def results_predict(img_path, model, hooks, threshold=0.5, iou=0.7, save_image =
         x0, y0, x1, y1 = ops.scale_boxes(img_shape, np.array([x0.cpu(), y0.cpu(), x1.cpu(), y1.cpu()]), orig_img_shape)
         logits = all_logits[:,i]
         
-        # Filter by score threshold (of max score class)
-        if max(class_probs_after_sigmoid) > threshold:
-            boxes.append({
-                'image_id': img_path,
-                # YOLO output coordinates: [x,y,w,h]: (x,y)=top left corner, w=width, h=height
-                'bbox': [x0.item(), y0.item(), x1.item() - x0.item(), y1.item() - y0.item()],
-                'logits': logits.cpu().tolist(),
-                'activations': [p.item() for p in class_probs_after_sigmoid]
-            })
+        boxes.append({
+            'image_id': img_path,
+            'bbox': [x0.item(), y0.item(), x1.item(), y1.item()], # xyxy
+            'bbox_xywh': [(x0.item() + x1.item())/2, (y0.item() + y1.item())/2, x1.item() - x0.item(), y1.item() - y0.item()],
+            'logits': logits.cpu().tolist(),
+            'activations': [p.item() for p in class_probs_after_sigmoid]
+        })
 
-    nms_results = nms(boxes, iou)
+    # for debugging
+    # top10 = sorted(boxes, key=lambda x: max(x['activations']), reverse=True)[:10]
+    # plot_image(img_path, top10, suffix="before_nms")
 
-    if save_image:
-        plot_image(img_path, nms_results, category_mapping)
+    # NMS
+    # we can keep the activations and logits around via the YOLOv8 NMS method, but only if we
+    # append them as an additional time to the prediction vector. It's a weird hacky way to do it, but
+    # it works. We also have to pass in the num classes (nc) parameter to make it work.
+    boxes_for_nms = torch.stack([
+        torch.tensor([*b['bbox_xywh'], *b['activations'], *b['activations'], *b['logits']]) for b in boxes
+    ], dim=1).unsqueeze(0)
+    
+    # do the NMS
+    nms_results = ops.non_max_suppression(boxes_for_nms, conf_thres=threshold, iou_thres=iou, nc=detect.nc)[0]
+    
+    # unpack it and return it
+    boxes = []
+    for b in range(nms_results.shape[0]):
+        box = nms_results[b, :]
+        x0, y0, x1, y1, conf, cls, *acts_and_logits = box
+        activations = acts_and_logits[:detect.nc]
+        logits = acts_and_logits[detect.nc:]
+        box_dict = {
+            'bbox': [x0.item(), y0.item(), x1.item(), y1.item()], # xyxy
+            'bbox_xywh': [(x0.item() + x1.item())/2, (y0.item() + y1.item())/2, x1.item() - x0.item(), y1.item() - y0.item()],
+            'best_conf': conf.item(),
+            'best_cls': cls.item(),
+            'image_id': img_path,
+            'activations': [p.item() for p in activations],
+            'logits': [p.item() for p in logits]
+        }
+        boxes.append(box_dict)
 
-    # if save_json:
-    #     write_json(img_path, nms_results)
-
-    return nms_results
+    return boxes
 
 
 def run_predict(input_path, model, hooks, score_threshold=0.5, iou_threshold=0.7, save_image = False, save_json = False, category_mapping = None):
@@ -317,41 +346,17 @@ def run_predict(input_path, model, hooks, score_threshold=0.5, iou_threshold=0.7
 ### (This shows how to use the methods in this file) ###
 def main():
     # change these, of course :)
-    SAVE_TEST_IMG = False
+    SAVE_TEST_IMG = True
     model_path = 'yolov8n.pt'
     img_path = 'bus.jpg'
     threshold = 0.5
+    nms_threshold = 0.7
 
     # load the model
     model, hooks = load_and_prepare_model(model_path)
 
     # run inference
-    results = run_predict(img_path, model, hooks)
-
-    print("Processed", len(results), "boxes")
-    print("The first one is", results[0])
-
-    if SAVE_TEST_IMG:
-        plot_image(img_path, results)
-
-if __name__ == '__main__':
-    main()
-
-
-### Start example script here ###
-### (This shows how to use the methods in this file) ###
-def main():
-    # change these, of course :)
-    SAVE_TEST_IMG = False
-    model_path = 'yolov8n.pt'
-    img_path = 'bus.jpg'
-    threshold = 0.5
-
-    # load the model
-    model, hooks = load_and_prepare_model(model_path)
-
-    # run inference
-    results = run_predict(img_path, model, hooks)
+    results = run_predict(img_path, model, hooks, score_threshold=threshold, iou_threshold=nms_threshold)
 
     print("Processed", len(results), "boxes")
     print("The first one is", results[0])
