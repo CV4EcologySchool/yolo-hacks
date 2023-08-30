@@ -132,7 +132,7 @@ def write_json(results):
         #image_id = os.path.basename(img_path).split('.')[0]
         max_category_id = result['activations'].index(max(result['activations']))
         category_id = max_category_id
-        bbox = result['bbox']
+        bbox = result["bbox_xywh"]  #result['bbox']
         score = max(result['activations'])
         activations = result['activations']
 
@@ -148,7 +148,7 @@ def write_json(results):
 
     # Write the predictions list to a JSON file
     with open('predictions.json', 'w') as f:
-        json.dump(predictions, f)
+        json.dump(predictions, f, indent=4)
 
 
 def calculate_iou(box1, box2):
@@ -210,7 +210,13 @@ def nms(boxes, iou_threshold=0.7):
     return filtered_boxes
 
 
-def results_predict(img_path, model, hooks, threshold=0.5, iou=0.7, save_image = False, category_mapping = None):
+def softmax_temperature(logits, temperature=1.0):
+    logits_tensor = torch.tensor(logits)
+    logits_temperature = logits_tensor / temperature
+    return torch.softmax(logits_temperature, dim=0)
+
+
+def results_predict(img_path, model, hooks, threshold=0.5, iou=0.7, softmax_temperature_value = 1.0):
     """
     Run prediction with a YOLO model and apply Non-Maximum Suppression (NMS) to the results.
 
@@ -220,7 +226,7 @@ def results_predict(img_path, model, hooks, threshold=0.5, iou=0.7, save_image =
         hooks (list): List of hooks for the model.
         threshold (float, optional): Confidence threshold for detection. Default is 0.5.
         iou (float, optional): Intersection over Union (IoU) threshold for NMS. Default is 0.7.
-        save_image (bool, optional): Whether to save the image with boxes plotted. Default is False.
+        softmax_temperature_value (float, optional): Softmax temperature, the closer to 0, the harder the softmax would be
 
     Returns:
         list: List of selected bounding box dictionaries after NMS.
@@ -286,11 +292,11 @@ def results_predict(img_path, model, hooks, threshold=0.5, iou=0.7, save_image =
     for b in range(nms_results.shape[0]):
         box = nms_results[b, :]
         x0, y0, x1, y1, conf, cls, *acts_and_logits = box
-        activations = acts_and_logits[:detect.nc]
         logits = acts_and_logits[detect.nc:]
+        activations = softmax_temperature(logits, softmax_temperature_value)
         box_dict = {
             'bbox': [x0.item(), y0.item(), x1.item(), y1.item()], # xyxy
-            'bbox_xywh': [(x0.item() + x1.item())/2, (y0.item() + y1.item())/2, x1.item() - x0.item(), y1.item() - y0.item()],
+            'bbox_xywh': [x0.item(), y0.item(), x1.item() - x0.item(), y1.item() - y0.item()],
             'best_conf': conf.item(),
             'best_cls': cls.item(),
             'image_id': img_path,
@@ -302,7 +308,7 @@ def results_predict(img_path, model, hooks, threshold=0.5, iou=0.7, save_image =
     return boxes
 
 
-def run_predict(input_path, model, hooks, score_threshold=0.5, iou_threshold=0.7, save_image = False, save_json = False, category_mapping = None):
+def run_predict(input_path, model_path, score_threshold=0.5, iou_threshold=0.7, save_image = False, save_json = False, category_mapping = None, softmax_temperature_value = 1.0):
     """
     Run prediction with a YOLO model.
 
@@ -318,6 +324,10 @@ def run_predict(input_path, model, hooks, score_threshold=0.5, iou_threshold=0.7
     Returns:
         list: List of selected bounding box dictionaries for all the images given as input.
     """
+
+    # load the model
+    model, hooks = load_and_prepare_model(model_path)
+
     use_txt_input = False
 
     if is_text_file(input_path):
@@ -332,12 +342,15 @@ def run_predict(input_path, model, hooks, score_threshold=0.5, iou_threshold=0.7
     all_results = []
 
     for img_path in img_paths:
-        results = results_predict(img_path, model, hooks, score_threshold, iou=iou_threshold, save_image=save_image, category_mapping=category_mapping)
+        results = results_predict(img_path, model, hooks, score_threshold, iou=iou_threshold, softmax_temperature_value=softmax_temperature_value)
 
         all_results.extend(results)
 
-    if save_json:
-        write_json(all_results)
+        if save_image:
+            plot_image(img_path, results, category_mapping)
+        
+        if save_json:
+            write_json(all_results)
 
     return all_results
 
@@ -352,11 +365,8 @@ def main():
     threshold = 0.5
     nms_threshold = 0.7
 
-    # load the model
-    model, hooks = load_and_prepare_model(model_path)
-
     # run inference
-    results = run_predict(img_path, model, hooks, score_threshold=threshold, iou_threshold=nms_threshold)
+    results = run_predict(img_path, model_path, score_threshold=threshold, iou_threshold=nms_threshold)
 
     print("Processed", len(results), "boxes")
     print("The first one is", results[0])
